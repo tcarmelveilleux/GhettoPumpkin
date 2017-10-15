@@ -10,18 +10,22 @@ Copyright 2017, Tennessee Carmel-Veilleux
 """
 from __future__ import print_function
 import time
+import json
 import socket
 import argparse
 import threading
 from Queue import Queue, Empty
 
+DEFAULT_UDP_PORT = 6321
+DEFAULT_UDP_ADDR = "127.0.0.1"
 
 class Animator(object):
     """
     Basic animation thread with time-steps management
     """
-    def __init__(self, update_rate, *args, **kwargs):
+    def __init__(self, id, update_rate, *args, **kwargs):
         self._config = kwargs.get("config", {})
+        self._id = id
 
         # Accumulated time
         self._t = 0.0
@@ -33,11 +37,15 @@ class Animator(object):
         self._thread = threading.Thread(target=self._thread_process)
         self._queue = Queue()
 
+    @property
+    def id(self):
+        return self._id
+
     def start(self):
         if not self._thread.is_alive():
             self._thread.start()
 
-    def stop(self, timeout=1.0):
+    def shutdown(self, timeout=1.0):
         if self._thread.is_alive():
             self._queue.put({"event": "shutdown"})
             self._thread.join(timeout=timeout)
@@ -93,8 +101,8 @@ class Animator(object):
 
 
 class PeriodicAnimator(Animator):
-    def __init__(self, update_rate, *args, **kwargs):
-        super(PeriodicAnimator, self).__init__(update_rate, *args, **kwargs)
+    def __init__(self, id, update_rate, *args, **kwargs):
+        super(PeriodicAnimator, self).__init__(id, update_rate, *args, **kwargs)
 
     def _setup(self):
         print("_setup() called")
@@ -110,10 +118,10 @@ class PeriodicAnimator(Animator):
 
 
 class LedPWMAnimator(Animator):
-    ALGO_BACK_AND_FORTH = 1
+    ALGO_BACK_AND_FORTH = "back_and_forth"
 
-    def __init__(self, rgb_led_setter, **kwargs):
-        super(LedPWMAnimator, self).__init__(0.1)
+    def __init__(self, id, rgb_led_setter, **kwargs):
+        super(LedPWMAnimator, self).__init__(id, 0.1)
         self._rgb_led_setter = rgb_led_setter
         self._back_and_forth_time = kwargs.get("back_and_forth_time", 2.0)
         self._back_and_forth_start = kwargs.get("back_and_forth_start", (0.0, 0.0, 0.0))
@@ -159,38 +167,6 @@ class LedPWMAnimator(Animator):
         pass
 
 
-class MaestroServoPulseSetter(object):
-    def __init__(self, serial_device):
-        from drivers.pololu_maestro import PololuMaestro
-        self._serial_device = serial_device
-        self._driver = PololuMaestro(serial_device)
-        self._driver.connect()
-        self._lock = threading.Lock()
-        self._is_open = True
-
-    def get_channel_setter(self, channel_id):
-        def setter(microseconds):
-            counts = int(microseconds * 4.0)
-            with self._lock:
-                if not self._is_open:
-                    return
-                self._driver.set_target(channel_id, counts)
-
-        return setter
-
-    def shutdown(self):
-        with self._lock:
-            self._is_open = False
-            self._driver.close()
-
-
-def sign(val):
-    if val < 0:
-        return -1
-    else:
-        return 1
-
-
 class EyeController(Animator):
     """
     Animation controller for the position of a servo-controlled eye.
@@ -207,8 +183,8 @@ class EyeController(Animator):
     EVENT_EYE_POSITION = "eye_position"
     EVENT_RESUME_BACK_AND_FORTH = "resume_back_and_forth"
 
-    def __init__(self, servo_setter, *args, **kwargs):
-        super(EyeController, self).__init__(update_rate=kwargs.get("update_rate", 0.1))
+    def __init__(self, id, servo_setter, *args, **kwargs):
+        super(EyeController, self).__init__(id=id, update_rate=kwargs.get("update_rate", 0.1))
         self._min_us = kwargs.get("min_us", 1500.0)
         self._max_us = kwargs.get("max_us", 1500.0)
         self._center_us = kwargs.get("center_us", 1500.0)
@@ -305,49 +281,228 @@ class EyeController(Animator):
     def resume_back_and_forth(self):
         self.queue_event(self.EVENT_RESUME_BACK_AND_FORTH, None)
 
+
+class Driver(object):
+    def __init__(self, id="driver", **kwargs):
+        self._lock = threading.Lock()
+        self._id = id
+
+    @property
+    def id(self):
+        return self._id
+
+    def start(self):
+        pass
+
+    def shutdown(self):
+        pass
+
+    def get_channel(self, channel_id):
+        return None
+
+
+class ServoDriver(Driver):
+    def __init__(self, id="servo", **kwargs):
+        super(ServoDriver, self).__init__(id=id, **kwargs)
+
+    def get_channel(self, channel_id):
+        def setter(microseconds):
+            # channel_id can be closured here
+            pass
+        return setter
+
+
+class MaestroServoDriver(ServoDriver):
+    def __init__(self, **kwargs):
+        super(MaestroServoDriver, self).__init__(**kwargs)
+        self._serial_device = kwargs["serial_device"]
+        self._is_open = False
+        self._driver = None
+
+    def start(self):
+        with self._lock:
+            from drivers.pololu_maestro import PololuMaestro
+            self._driver = PololuMaestro(self._serial_device)
+            self._driver.connect()
+            self._is_open = True
+
+    def get_channel(self, channel_id):
+        def setter(microseconds):
+            counts = int(microseconds * 4.0)
+            with self._lock:
+                if self._driver is None or not self._is_open:
+                    return
+                self._driver.set_target(channel_id, counts)
+        return setter
+
+    def shutdown(self):
+        with self._lock:
+            self._is_open = False
+            self._driver.close()
+
+
+class ConsoleServoDriver(ServoDriver):
+    def __init__(self, **kwargs):
+        super(ConsoleServoDriver, self).__init__(**kwargs)
+
+    def get_channel(self, channel_id):
+        def setter(microseconds):
+            with self._lock:
+                print("Setting servo id=%s channel %d to %dus" % (self._id, channel_id, microseconds))
+        return setter
+
+
+class RgbLedDriver(Driver):
+    def __init__(self, **kwargs):
+        super(RgbLedDriver, self).__init__(**kwargs)
+
+    def get_channel(self, channel_id):
+        def setter(r, g, b):
+            # Set the RGB to normalized R [0..1], G [0..1], B [0..1]. Can closure the channel_id
+            pass
+        return setter
+
+
+class ConsoleRgbLedDriver(RgbLedDriver):
+    def __init__(self, **kwargs):
+        super(ConsoleRgbLedDriver, self).__init__(**kwargs)
+
+    def get_channel(self, channel_id):
+        def setter(r, g, b):
+            with self._lock:
+                print("Setting RGB driver id=%s channel %d to (%.3f, %.3f, %.3f)" % (self._id, channel_id, r, g, b))
+        return setter
+
+
+class ConfigOnlyDriver(Driver):
+    def __init__(self, **kwargs):
+        super(ConfigOnlyDriver, self).__init__(**kwargs)
+        self._config = kwargs
+
+
+def sign(val):
+    if val < 0:
+        return -1
+    else:
+        return 1
+
+
 class PumpkinStateMachine(object):
-    def __init__(self):
-        self.event_queue = Queue()
+    def __init__(self, drivers, mappings, eyes_controller, left_led_controller, right_led_controller):
+        self._drivers = drivers
+        self._mappings = mappings
+        self._eyes_controller = eyes_controller
+        self._left_led_controller = left_led_controller
+        self._right_led_controller = right_led_controller
 
-def rgb_led_setter(r, g, b):
-    print("r=%.2f, g=%.2f, b=%.2f" % (r, g, b))
+    def start(self):
+        for id, driver in self._drivers.items():
+            print("Starting driver: %s" % id)
+            driver.start()
 
-def dummy_servo_setter(microseconds):
-    print("About to set servo target %dus" % int(microseconds))
+        for controller in [self._eyes_controller, self._left_led_controller, self._right_led_controller]:
+            print("Starting controller: %s" % controller.id)
+            controller.start()
+
+    def shutdown(self):
+        for controller in [self._eyes_controller, self._left_led_controller, self._right_led_controller]:
+            print("Stopping controller: %s" % controller.id)
+            controller.shutdown()
+
+        for id, driver in self._drivers.items():
+            print("Stopping driver: %s" % id)
+            driver.shutdown()
+
+
+def load_json_config(filename):
+    with open(filename, "rb") as infile:
+        return json.load(infile)
+
+
+def create_driver(driver):
+    driver_type = driver["type"]
+    if driver_type == "maestro":
+        driver_instance = MaestroServoDriver(**driver)
+    elif driver_type == "servo_console":
+        driver_instance = ConsoleServoDriver(**driver)
+    elif driver_type == "rgb_led_console":
+        driver_instance = ConsoleRgbLedDriver(**driver)
+    elif driver_type == "config":
+        driver_instance = ConfigOnlyDriver(**driver)
+    else:
+        raise KeyError("Don't know how to instantiate driver type '%s'" % driver_type)
+
+    mappings = {}
+    for name, channel_id in driver.get("mapping", {}).items():
+        mappings[name] = driver_instance.get_channel(channel_id)
+
+    return driver_instance, mappings
+
+
+def instantiate_drivers(driver_config):
+    mappings = {}
+    drivers = {}
+
+    for driver in driver_config["drivers"]:
+        driver_id = driver["id"]
+        driver_instance, driver_mappings = create_driver(driver)
+
+        drivers[driver_id] = driver_instance
+        mappings.update(driver_mappings)
+
+    return drivers, mappings
+
+
+def instantiate_config(driver_config, animation_config, profile="default"):
+    profiles = animation_config["profiles"]
+
+    # Generic drivers and channels mapping config instantiation
+    drivers, mappings = instantiate_drivers(driver_config)
+
+    # Ghetto-pumpkin-specific loading of animation params
+    animation_profile = profiles.get(profile)
+
+    eye_controller_profile = animation_profile["eye_controller"]
+    eye_controller_driver = mappings[eye_controller_profile["mapping"]]
+    eye_controller = EyeController(id="eye_controller", servo_setter=eye_controller_driver, **eye_controller_profile)
+
+    left_eye_led_profile = animation_profile["left_eye_led"]
+    left_eye_led_driver = mappings[left_eye_led_profile["mapping"]]
+    left_eye_led_controller = LedPWMAnimator(id="left_eye_led", rgb_led_setter=left_eye_led_driver, **left_eye_led_profile)
+
+    right_eye_led_profile = animation_profile["right_eye_led"]
+    right_eye_led_driver = mappings[right_eye_led_profile["mapping"]]
+    right_eye_led_controller = LedPWMAnimator(id="right_eye_led", rgb_led_setter=right_eye_led_driver, **right_eye_led_profile)
+
+    return PumpkinStateMachine(drivers, mappings, eye_controller, left_eye_led_controller, right_eye_led_controller)
+
+
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('-p', '--port', metavar="UDP_PORT", default=DEFAULT_UDP_PORT, type=int, action="store",
+                        help='Set UDP port for output (default: %d)' % DEFAULT_UDP_PORT)
+    parser.add_argument('-a', '--address', metavar="UDP_ADDR", default=DEFAULT_UDP_ADDR, action="store",
+                        help='Set UDP address for output (default: %s)' % DEFAULT_UDP_ADDR)
+    parser.add_argument('-c', '--animation-config', metavar="JSON_FILENAME", required=True, action="store",
+                        help='Set config file to use for animation')
+    parser.add_argument('-d', '--driver-config', metavar="JSON_FILENAME", required=True, action="store",
+                        help='Set config file to use for drivers')
+
+    args = parser.parse_args()
+    return args
 
 
 if __name__ == '__main__':
-    if True:
-        eye_config = {
-            "min_us": 1295.0,
-            "max_us": 1828.0,
-            "center_us": 1535.0,
-            "eye_speed": 3.0
-        }
-        serial_device = "COM37"
+    args = parse_args()
 
-        if False:
-            maestro = MaestroServoPulseSetter(serial_device)
-            eyes_servo_setter = maestro.get_channel_setter(0)
-        else:
-            eyes_servo_setter = dummy_servo_setter
+    # TODO: Add try/except around config load
+    animation_config = load_json_config(args.animation_config)
+    driver_config = load_json_config(args.driver_config)
 
-        eye_animator = EyeController(eyes_servo_setter, verbose=True, **eye_config)
-        eye_animator.start()
-        time.sleep(2.0)
-        eye_animator.set_eye_position(0.25)
-        time.sleep(5.0)
-        eye_animator.resume_back_and_forth()
-        time.sleep(2.0)
-        eye_animator.stop()
-
-    if False:
-        led_animator = LedPWMAnimator(rgb_led_setter)
-        led_animator.start()
-        time.sleep(2.0)
-        led_animator.queue_event("set_value", 10.0)
-        time.sleep(3.0)
-        led_animator.stop()
+    animation_setup = instantiate_config(driver_config, animation_config)
+    animation_setup.start()
+    time.sleep(10.0)
+    animation_setup.shutdown()
 
     if False:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)

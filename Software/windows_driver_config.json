@@ -1,0 +1,27 @@
+{
+  "comment": "Configuration file for drivers under Windows",
+  "drivers": [
+    {
+      "id": "servos",
+      "type": "maestro",
+      "______type": "servo_console",
+      "serial_device": "COM37",
+      "mapping": {
+        "eyes_servo": 0
+      }
+    },
+    {
+      "id": "rgb_leds",
+      "type": "rgb_led_console",
+      "mapping": {
+        "left_eye_led": 0,
+        "right_eye_led": 1
+      }
+    },
+    {
+      "id": "camera",
+      "type": "config",
+      "camera_idx": 0
+    }
+  ]
+}
