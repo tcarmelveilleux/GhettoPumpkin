@@ -14,6 +14,7 @@ import json
 import socket
 import argparse
 import threading
+import subprocess
 from Queue import Queue, Empty
 
 DEFAULT_UDP_PORT = 6321
@@ -184,7 +185,7 @@ class EyeController(Animator):
     EVENT_RESUME_BACK_AND_FORTH = "resume_back_and_forth"
 
     def __init__(self, id, servo_setter, *args, **kwargs):
-        super(EyeController, self).__init__(id=id, update_rate=kwargs.get("update_rate", 0.1))
+        super(EyeController, self).__init__(id=id, update_rate=kwargs.get("update_rate", 0.05))
         self._min_us = kwargs.get("min_us", 1500.0)
         self._max_us = kwargs.get("max_us", 1500.0)
         self._center_us = kwargs.get("center_us", 1500.0)
@@ -283,6 +284,9 @@ class EyeController(Animator):
 
 
 class Driver(object):
+    """
+    Base class for drivers. Each driver has its own extended interface on top of these basic methods.
+    """
     def __init__(self, id="driver", **kwargs):
         self._lock = threading.Lock()
         self._id = id
@@ -298,6 +302,14 @@ class Driver(object):
         pass
 
     def get_channel(self, channel_id):
+        """
+        Return a setter callable for the given internal channel, or a driver-specific
+        instance that allows the channel to be operated. The returned object must be
+        valid until `shutdown()` is called.
+
+        :param channel_id: channel identifier (usually an integer)
+        :return: object to operate the given channel
+        """
         return None
 
 
@@ -366,18 +378,14 @@ class RgbLedDriver(Driver):
 class ConsoleRgbLedDriver(RgbLedDriver):
     def __init__(self, **kwargs):
         super(ConsoleRgbLedDriver, self).__init__(**kwargs)
+        self._quiet = kwargs.get("quiet", False)
 
     def get_channel(self, channel_id):
         def setter(r, g, b):
+            if self._quiet: return
             with self._lock:
                 print("Setting RGB driver id=%s channel %d to (%.3f, %.3f, %.3f)" % (self._id, channel_id, r, g, b))
         return setter
-
-
-class ConfigOnlyDriver(Driver):
-    def __init__(self, **kwargs):
-        super(ConfigOnlyDriver, self).__init__(**kwargs)
-        self._config = kwargs
 
 
 def sign(val):
@@ -387,15 +395,110 @@ def sign(val):
         return 1
 
 
-class PumpkinStateMachine(object):
+class VisionProcess(Driver):
+    """
+    Basic animation thread with time-steps management
+    """
+    def __init__(self, id, **kwargs):
+        super(VisionProcess, self).__init__(id=id, **kwargs)
+        self._id = id
+
+        self._udp_addr = kwargs["udp_addr"]
+        self._udp_port = kwargs["udp_port"]
+        self._camera_idx = kwargs["camera_idx"]
+        self._process_cmd = kwargs["process_cmd"]
+        self._view_image = kwargs["view_image"]
+        self._process = None
+        self._handler = None
+        self._socket = None
+        self._thread = threading.Thread(target=self._thread_process)
+        self._queue = Queue()
+
+    @property
+    def id(self):
+        return self._id
+
+    def set_handler(self, handler):
+        self._queue.put({"event": "set_handler", "handler": handler})
+
+    def start(self):
+        if not self._thread.is_alive():
+            self._thread.start()
+
+    def shutdown(self, timeout=1.0):
+        if self._thread.is_alive():
+            self._queue.put({"event": "shutdown"})
+            self._thread.join(timeout=timeout)
+
+    def _launch_process(self):
+        full_cmd = "%s -c %d -a %s -p %d --mirror %s" % (self._process_cmd, self._camera_idx,
+                                                         self._udp_addr, self._udp_port,
+                                                         "-v" if self._view_image else "")
+        self._process = subprocess.Popen(full_cmd)
+
+    def _thread_process(self):
+        self._launch_process()
+
+        self._socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self._socket.bind((self._udp_addr, self._udp_port))
+        self._socket.settimeout(0.2)
+
+        done = False
+        while not done:
+            # Drain our event queue
+            while True:
+                try:
+                    event = self._queue.get(block=False)
+                    if event["event"] == "set_handler":
+                        self._handler = event["handler"]
+                    elif event["event"] == "shutdown":
+                        done = True
+                except Empty:
+                    break
+
+            # Try to receive a UDP frame from the vision process for a while
+            try:
+                data, addr = self._socket.recvfrom(2048)
+                vision_event = json.loads(data)
+                if self._handler is not None:
+                    self._handler(vision_event)
+
+            except socket.timeout:
+                pass
+
+        # Done: terminate vision server
+        try:
+            self._process.terminate()
+            self._process.wait()
+        except subprocess.CalledProcessError:
+            pass
+
+
+class PumpkinAnimator(Animator):
+    """
+    Main Animation for the Ghetto Pumpkin.
+
+    Glues together all the drivers and animators to make the pumpkin follow a face
+    target if one is available, or otherwise move its eyes back and forth with a
+    color change taking effect.
+    """
+    STATE_BACK_AND_FORTH = "back_and_forth"
+    STATE_FIXATED = "fixated"
+
     def __init__(self, drivers, mappings, eyes_controller, left_led_controller, right_led_controller):
+        super(PumpkinAnimator, self).__init__("pumpkin_animator", 0.1)
         self._drivers = drivers
         self._mappings = mappings
         self._eyes_controller = eyes_controller
         self._left_led_controller = left_led_controller
         self._right_led_controller = right_led_controller
+        self._fixation_timeout = 3.0
+        self._verbose = True
+        self._last_face_time = 0.0
+        self._target_location = 0.5
+        self._state = None
 
-    def start(self):
+    def _setup(self):
         for id, driver in self._drivers.items():
             print("Starting driver: %s" % id)
             driver.start()
@@ -404,7 +507,10 @@ class PumpkinStateMachine(object):
             print("Starting controller: %s" % controller.id)
             controller.start()
 
-    def shutdown(self):
+        self._state = self.STATE_BACK_AND_FORTH
+        self._last_face_time = self._t
+
+    def _teardown(self):
         for controller in [self._eyes_controller, self._left_led_controller, self._right_led_controller]:
             print("Stopping controller: %s" % controller.id)
             controller.shutdown()
@@ -413,6 +519,34 @@ class PumpkinStateMachine(object):
             print("Stopping driver: %s" % id)
             driver.shutdown()
 
+    def _set_state(self, new_state):
+        # Optional logging hook
+        if new_state != self._state:
+            if self._verbose:
+                print("%s: %s -> %s" % (self.__class__.__name__, self._state, new_state))
+            self._state = new_state
+
+    def _update(self):
+        fixation_expired = (self._t - self._last_face_time) > self._fixation_timeout
+        if fixation_expired and self._state == self.STATE_FIXATED:
+            self._eyes_controller.resume_back_and_forth()
+            self._set_state(self.STATE_BACK_AND_FORTH)
+
+    def _handle_event(self, event_type, event_data):
+        if event_type == "face_detector":
+            faces = event_data["faces"]
+            if len(faces) == 0:
+                return
+
+            biggest_face = faces[0]
+            self._target_location = biggest_face["cx"]
+            print("Got face, location=%.3f" % self._target_location)
+            self._last_face_time = self._t
+            self._eyes_controller.set_eye_position(self._target_location)
+            self._set_state(self.STATE_FIXATED)
+
+    def handle_face_event(self, vision_event):
+        self.queue_event("face_detector", vision_event)
 
 def load_json_config(filename):
     with open(filename, "rb") as infile:
@@ -427,8 +561,8 @@ def create_driver(driver):
         driver_instance = ConsoleServoDriver(**driver)
     elif driver_type == "rgb_led_console":
         driver_instance = ConsoleRgbLedDriver(**driver)
-    elif driver_type == "config":
-        driver_instance = ConfigOnlyDriver(**driver)
+    elif driver_type == "vision_process":
+        driver_instance = VisionProcess(**driver)
     else:
         raise KeyError("Don't know how to instantiate driver type '%s'" % driver_type)
 
@@ -474,15 +608,15 @@ def instantiate_config(driver_config, animation_config, profile="default"):
     right_eye_led_driver = mappings[right_eye_led_profile["mapping"]]
     right_eye_led_controller = LedPWMAnimator(id="right_eye_led", rgb_led_setter=right_eye_led_driver, **right_eye_led_profile)
 
-    return PumpkinStateMachine(drivers, mappings, eye_controller, left_eye_led_controller, right_eye_led_controller)
+    face_detector = drivers["face_detector"]
+    pumpkin_animator = PumpkinAnimator(drivers, mappings, eye_controller, left_eye_led_controller, right_eye_led_controller)
+    face_detector.set_handler(pumpkin_animator.handle_face_event)
+
+    return pumpkin_animator
 
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument('-p', '--port', metavar="UDP_PORT", default=DEFAULT_UDP_PORT, type=int, action="store",
-                        help='Set UDP port for output (default: %d)' % DEFAULT_UDP_PORT)
-    parser.add_argument('-a', '--address', metavar="UDP_ADDR", default=DEFAULT_UDP_ADDR, action="store",
-                        help='Set UDP address for output (default: %s)' % DEFAULT_UDP_ADDR)
     parser.add_argument('-c', '--animation-config', metavar="JSON_FILENAME", required=True, action="store",
                         help='Set config file to use for animation')
     parser.add_argument('-d', '--driver-config', metavar="JSON_FILENAME", required=True, action="store",
@@ -501,16 +635,5 @@ if __name__ == '__main__':
 
     animation_setup = instantiate_config(driver_config, animation_config)
     animation_setup.start()
-    time.sleep(10.0)
+    time.sleep(60.0)
     animation_setup.shutdown()
-
-    if False:
-        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        addr = "127.0.0.1"
-        port = 5005
-        sock.bind((addr, port))
-        sock.settimeout(0.5)
-
-        while True:
-            data, addr = sock.recvfrom(2048)
-            print("From %s: %s" % (addr, data))

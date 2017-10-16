@@ -7,7 +7,7 @@
         "min_us": 1295.0,
         "max_us": 1828.0,
         "center_us": 1535.0,
-        "eye_speed": 3.0
+        "eye_speed": 1.5
       },
       "left_eye_led": {
         "mapping": "left_eye_led",

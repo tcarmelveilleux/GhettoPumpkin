@@ -69,11 +69,12 @@ def get_script_path():
     return os.path.dirname(os.path.realpath(sys.argv[0]))
 
 class FaceDetector(object):
-    def __init__(self, cap_device, scale_down=2, *args, **kwargs):
+    def __init__(self, cap_device, scale_down=2, mirror=False, *args, **kwargs):
         self._cap_device = cap_device
         self._width = cap_device.get(3)
         self._height = cap_device.get(4)
         self._scale_down = scale_down
+        self._mirror = mirror
         self._face_cascade = cv2.CascadeClassifier(os.path.join(get_script_path(), 'haarcascade_frontalface_default.xml'))
 
     def emit_faces(self, faces):
@@ -82,8 +83,12 @@ class FaceDetector(object):
     def do_one_frame(self, output_window=None):
         flag, img_orig = self._cap_device.read()
         img = img_orig
+        if self._mirror:
+            img = cv2.flip(img, 1)
+
         height, width = img.shape[:2]
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
         gray = cv2.resize(gray, (width / self._scale_down, height / self._scale_down))
 
         faces_detected = self._face_cascade.detectMultiScale(
@@ -119,8 +124,8 @@ class FaceDetector(object):
             self.emit_faces(faces)
 
 class UDPFaceDetector(FaceDetector):
-    def __init__(self, addr, port, cap_device, scale_down=2, *args, **kwargs):
-        super(UDPFaceDetector, self).__init__(cap_device, scale_down, *args, **kwargs)
+    def __init__(self, addr, port, cap_device, scale_down=2, mirror=False, *args, **kwargs):
+        super(UDPFaceDetector, self).__init__(cap_device, scale_down, mirror, *args, **kwargs)
         self._addr = addr
         self._port = port
         self._sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -171,6 +176,7 @@ def parse_args():
                         default=DEFAULT_DOWNSCALE, help='Set downscaling integer factor (default:%d)' % DEFAULT_DOWNSCALE)
     parser.add_argument('-v', '--view', action="store_true", default=False,
                         help='Enable viewing of camera and faces')
+    parser.add_argument('-m', '--mirror', action="store_true", help="Mirror X position (e.g. selfie-mode)")
 
     args = parser.parse_args()
     return args
@@ -190,7 +196,7 @@ def main():
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, args.width)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, args.height)
 
-    face_detector = UDPFaceDetector(args.address, args.port, cap, scale_down=args.downscale)
+    face_detector = UDPFaceDetector(args.address, args.port, cap, scale_down=args.downscale, mirror=args.mirror)
 
     while True:
         face_detector.do_one_frame(output_window=main_window)

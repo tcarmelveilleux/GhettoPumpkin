@@ -13,15 +13,20 @@
     {
       "id": "rgb_leds",
       "type": "rgb_led_console",
+      "quiet": true,
       "mapping": {
         "left_eye_led": 0,
         "right_eye_led": 1
       }
     },
     {
-      "id": "camera",
-      "type": "config",
-      "camera_idx": 0
+      "id": "face_detector",
+      "type": "vision_process",
+      "camera_idx": 0,
+      "udp_addr": "127.0.0.1",
+      "udp_port": 6677,
+      "process_cmd": "python vision.py",
+      "view_image": true
     }
   ]
 }
