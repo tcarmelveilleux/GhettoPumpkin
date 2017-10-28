@@ -120,6 +120,8 @@ class PeriodicAnimator(Animator):
 
 class LedPWMAnimator(Animator):
     ALGO_BACK_AND_FORTH = "back_and_forth"
+    STATE_FIXATED = 1
+    STATE_BACK_AND_FORTH = 2
 
     def __init__(self, id, rgb_led_setter, **kwargs):
         super(LedPWMAnimator, self).__init__(id, 0.1)
@@ -131,6 +133,7 @@ class LedPWMAnimator(Animator):
         self._last_t = 0.0
         self._cycle_start = 0.0
         self._direction = 1
+        self._state = self.STATE_BACK_AND_FORTH
 
     def _setup(self):
         self._rgb_led_setter(*self._back_and_forth_start)
@@ -158,15 +161,25 @@ class LedPWMAnimator(Animator):
         self._rgb_led_setter(r, g, b)
 
     def _update(self):
-        if self._algorithm == self.ALGO_BACK_AND_FORTH:
+        if self._algorithm == self.ALGO_BACK_AND_FORTH and self._state == self.STATE_BACK_AND_FORTH:
             self._update_back_and_forth()
 
     def _teardown(self):
         pass
 
+    def _set_state(self, new_state):
+        self._state = new_state
+        
+    def set_animation_state(self, new_state):
+        self.queue_event("set_state", new_state)
+        
     def _handle_event(self, event_type, event_data):
-        pass
-
+        if event_type == "set_state":
+            new_state = event_data
+            self._set_state(new_state)
+            if new_state == self.STATE_FIXATED:
+                self._rgb_led_setter(*self._back_and_forth_end)
+                
 
 class EyeController(Animator):
     """
@@ -413,7 +426,7 @@ class AdafruitPwmDriver(Driver):
                     g_chan = chan_config.get("g_chan")
                     b_chan = chan_config.get("b_chan")
 
-                    print("Setting RGB driver id=%s channel %d to (%.3f, %.3f, %.3f)" % (self._id, channel_id, r, g, b))
+                    # print("Setting RGB driver id=%s channel %d to (%.3f, %.3f, %.3f)" % (self._id, channel_id, r, g, b))
                     if r_chan is not None:
                         self._adafruit_pwm.setPWM(r_chan, 0, int(float(r) * 4095.0))
                     if g_chan is not None:
@@ -487,7 +500,8 @@ class VisionProcess(Driver):
         full_cmd = "%s -c %d -a %s -p %d --mirror %s" % (self._process_cmd, self._camera_idx,
                                                          self._udp_addr, self._udp_port,
                                                          "-v" if self._view_image else "")
-        self._process = subprocess.Popen(full_cmd)
+        print("Launching vision process with '%s'" % full_cmd)
+        self._process = subprocess.Popen(full_cmd, shell=True)
 
     def _thread_process(self):
         self._launch_process()
@@ -584,6 +598,8 @@ class PumpkinAnimator(Animator):
         if fixation_expired and self._state == self.STATE_FIXATED:
             self._eyes_controller.resume_back_and_forth()
             self._set_state(self.STATE_BACK_AND_FORTH)
+            self._left_led_controller.set_animation_state(self._left_led_controller.STATE_BACK_AND_FORTH)
+            self._right_led_controller.set_animation_state(self._right_led_controller.STATE_BACK_AND_FORTH)
 
     def _handle_event(self, event_type, event_data):
         if event_type == "face_detector":
@@ -592,12 +608,18 @@ class PumpkinAnimator(Animator):
                 return
 
             biggest_face = faces[0]
-            self._target_location = biggest_face["cx"]
+            cx = biggest_face["cx"]
+            w = biggest_face["width"]
+            a = w / 2.0
+            target_center = (cx - a) / (1.0 - (2.0 * a))
+            self._target_location = target_center
             print("Got face, location=%.3f" % self._target_location)
             self._last_face_time = self._t
             self._eyes_controller.set_eye_position(self._target_location)
             self._set_state(self.STATE_FIXATED)
-
+            self._left_led_controller.set_animation_state(self._left_led_controller.STATE_FIXATED)
+            self._right_led_controller.set_animation_state(self._right_led_controller.STATE_FIXATED)
+    
     def handle_face_event(self, vision_event):
         self.queue_event("face_detector", vision_event)
 
@@ -616,6 +638,8 @@ def create_driver(driver):
         driver_instance = ConsoleRgbLedDriver(**driver)
     elif driver_type == "vision_process":
         driver_instance = VisionProcess(**driver)
+    elif driver_type == "adafruit_pwm":
+		driver_instance = AdafruitPwmDriver(**driver)
     else:
         raise KeyError("Don't know how to instantiate driver type '%s'" % driver_type)
 
@@ -688,5 +712,10 @@ if __name__ == '__main__':
 
     animation_setup = instantiate_config(driver_config, animation_config)
     animation_setup.start()
-    time.sleep(60.0)
-    animation_setup.shutdown()
+    
+    try:
+        while True:
+	        time.sleep(0.1)
+    finally:
+		animation_setup.shutdown()
+	

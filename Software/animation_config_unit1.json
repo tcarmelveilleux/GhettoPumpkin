@@ -5,23 +5,23 @@
       "eye_controller": {
         "mapping": "eyes_servo",
         "min_us": 1295.0,
-        "max_us": 1828.0,
+        "max_us": 1800.0,
         "center_us": 1535.0,
         "eye_speed": 1.5
       },
       "left_eye_led": {
         "mapping": "left_eye_led",
         "algorithm": "back_and_forth",
-        "back_and_forth_time": 2.0,
+        "back_and_forth_time": 1.0,
         "back_and_forth_start": [0.0, 0.0, 0.0],
-        "back_and_forth_end": [1.0, 1.0, 0.0]
+        "back_and_forth_end": [0.3, 1.0, 0.0]
       },
       "right_eye_led": {
         "mapping": "right_eye_led",
         "algorithm": "back_and_forth",
-        "back_and_forth_time": 2.0,
+        "back_and_forth_time": 1.0,
         "back_and_forth_start": [0.0, 0.0, 0.0],
-        "back_and_forth_end": [1.0, 1.0, 0.0]
+        "back_and_forth_end": [0.3, 1.0, 0.0]
       }
     }
   }
