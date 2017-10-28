@@ -388,6 +388,59 @@ class ConsoleRgbLedDriver(RgbLedDriver):
         return setter
 
 
+class AdafruitPwmDriver(Driver):
+    def __init__(self, **kwargs):
+        super(AdafruitPwmDriver, self).__init__(**kwargs)
+        self._i2c_addr = kwargs.get("i2c_addr", 64)
+        self._channels = kwargs.get("chan_configs", [])
+        # Compatible with most servos and not too pulsy for LEDs
+        self._pwm_freq_hz = kwargs.get("pwm_freq_hz", 48)
+        # Correction factor for RC clock since Adafruit PWM servo hat
+        # does not have a crystal clock and RC clock can be up to 10% off
+        self._clock_corr_factor = float(kwargs.get("clock_corr_factor", 1.0))
+
+        from drivers.Adafruit_PWM_Servo_Driver import PWM
+        self._adafruit_pwm = PWM(address=self._i2c_addr)
+        self._adafruit_pwm.setPWMFreq(48)
+
+    def get_channel(self, channel_id):
+        chan_config = self._channels[channel_id]
+        chan_type = chan_config["type"]
+        if chan_type == "rgb_led":
+            def setter(r, g, b):
+                with self._lock:
+                    r_chan = chan_config.get("r_chan")
+                    g_chan = chan_config.get("g_chan")
+                    b_chan = chan_config.get("b_chan")
+
+                    print("Setting RGB driver id=%s channel %d to (%.3f, %.3f, %.3f)" % (self._id, channel_id, r, g, b))
+                    if r_chan is not None:
+                        self._adafruit_pwm.setPWM(r_chan, 0, int(float(r) * 4095.0))
+                    if g_chan is not None:
+                        self._adafruit_pwm.setPWM(g_chan, 0, int(float(g) * 4095.0))
+                    if b_chan is not None:
+                        self._adafruit_pwm.setPWM(b_chan, 0, int(float(b) * 4095.0))
+
+            return setter
+        elif chan_type == "servo":
+            servo_chan = chan_config["chan"]
+            start_us = chan_config.get("start_us", 0)
+
+            def setter(microseconds):
+                pulse_len_us = float(1e6)  # 1,000,000 us per second at 1Hz
+                pulse_len_us /= float(self._pwm_freq_hz)  # us per pulse
+                duration_us = self._clock_corr_factor * microseconds
+                offset_us = self._clock_corr_factor * start_us
+                duration_counts = (duration_us / pulse_len_us) * 4095
+                offset_counts = (offset_us / pulse_len_us) * 4095
+                with self._lock:
+                    self._adafruit_pwm.setPWM(servo_chan, int(offset_counts), int(offset_counts) + int(duration_counts))
+
+            return setter
+        else:
+            raise ValueError("Channel type not understood: %s" % chan_type)
+
+
 def sign(val):
     if val < 0:
         return -1

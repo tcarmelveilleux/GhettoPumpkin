@@ -5,7 +5,8 @@
       "id": "servos",
       "type": "maestro",
       "______type": "servo_console",
-      "serial_device": "COM37",
+      "____serial_device": "COM37",
+      "serial_device": "COM5",
       "mapping": {
         "eyes_servo": 0
       }

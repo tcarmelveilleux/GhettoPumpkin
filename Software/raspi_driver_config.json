@@ -1,0 +1,47 @@
+{
+  "comment": "Configuration file for drivers under Windows",
+  "drivers": [
+    {
+      "id": "pwm_channels",
+      "type": "adafruit_pwm",
+      "i2c_addr": 65,
+      "clock_corr_factor": 1.073446,
+      "chan_configs": [
+        {
+          "comment": "channel 0: left eye RGB LED",
+          "type": "rgb_led",
+          "r_chan": 0,
+          "g_chan": 1,
+          "b_chan": null
+        },
+        {
+          "comment": "channel 1: right eye RGB LED",
+          "type": "rgb_led",
+          "r_chan": 2,
+          "g_chan": 3,
+          "b_chan": null
+        },
+        {
+          "comment": "channel 2: eyes servo",
+          "type": "servo",
+          "chan": 4,
+          "start_us": 0
+        }
+      ],
+      "mapping": {
+        "left_eye_led": 0,
+        "right_eye_led": 1,
+        "eyes_servo": 2
+      }
+    },
+    {
+      "id": "face_detector",
+      "type": "vision_process",
+      "camera_idx": 0,
+      "udp_addr": "127.0.0.1",
+      "udp_port": 6677,
+      "process_cmd": "python vision.py",
+      "view_image": true
+    }
+  ]
+}
