@@ -639,7 +639,7 @@ def create_driver(driver):
     elif driver_type == "vision_process":
         driver_instance = VisionProcess(**driver)
     elif driver_type == "adafruit_pwm":
-		driver_instance = AdafruitPwmDriver(**driver)
+        driver_instance = AdafruitPwmDriver(**driver)
     else:
         raise KeyError("Don't know how to instantiate driver type '%s'" % driver_type)
 
@@ -715,7 +715,7 @@ if __name__ == '__main__':
     
     try:
         while True:
-	        time.sleep(0.1)
+            time.sleep(0.1)
     finally:
-		animation_setup.shutdown()
-	
+        animation_setup.shutdown()
+
